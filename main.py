@@ -44,7 +44,10 @@ from audio_capture import AudioCapture
 from vad_processor import VADProcessor
 from asr_client import ASRClient, ASRWorkerError, ASRWorkerExited, ASRWorkerTimeout
 from translator import Translator, RepetitionError
-from transcript_writer import TranscriptWriter
+# txt transcripts are replaced by the shared history database (see history_db.py);
+# the writer itself is kept for when plain text files are wanted again.
+# from transcript_writer import TranscriptWriter
+from history_db import TranslationHistoryDB
 
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QDialog, QMessageBox
 from PyQt6.QtGui import (
@@ -229,7 +232,17 @@ class LiveTranslateApp:
         self._asr_queue = queue.Queue(maxsize=16)
         self._tl_executor = ThreadPoolExecutor(max_workers=8)
 
-        self._transcript = TranscriptWriter(Path(__file__).parent / "transcripts")
+        # Every finished translation is appended to the SQLite history shared with
+        # the C# LiveCaptions-Translator (same file, same table). An empty path in
+        # config.yaml disables the database.
+        history_cfg = config.get("history") or {}
+        history_path = str(history_cfg.get("db_path") or "").strip()
+        self._history = (
+            TranslationHistoryDB(history_path, api_name=f"LiveTranslate:{config['translation']['model']}")
+            if history_path
+            else None
+        )
+        # self._transcript = TranscriptWriter(Path(__file__).parent / "transcripts")
 
         # Memory diagnostic state
         import psutil
@@ -327,8 +340,9 @@ class LiveTranslateApp:
                 self._overlay.set_target_language(self._target_language)
         if "timeout" in settings and self._translator:
             self._translator.set_timeout(settings["timeout"])
-        if "auto_save_transcript" in settings:
-            self._transcript.set_enabled(settings["auto_save_transcript"])
+        # txt transcripts are disabled in favour of the history database.
+        # if "auto_save_transcript" in settings:
+        #     self._transcript.set_enabled(settings["auto_save_transcript"])
 
     def _mark_asr_unavailable(self, reason: str, client=None):
         with self._asr_lock:
@@ -1094,9 +1108,12 @@ class LiveTranslateApp:
             cost = self._compute_cost()
             log.info(f"Translate ({tl_ms:.0f}ms): {translated}")
             if translated:
-                self._transcript.write_translation(msg_id, translated)
-            else:
-                self._transcript.finalize_no_translation(msg_id)
+                # txt output is disabled; the history database is the record now.
+                # self._transcript.write_translation(msg_id, translated)
+                if self._history:
+                    self._history.log(text, translated, self._target_language)
+            # else:
+            #     self._transcript.finalize_no_translation(msg_id)
             if self._overlay:
                 self._overlay.update_translation(msg_id, translated, tl_ms)
                 self._overlay.update_stats(
@@ -1113,7 +1130,7 @@ class LiveTranslateApp:
                 self._subwin.update_text(text, tl_dict)
         except RepetitionError:
             log.warning("Repetition loop detected, model may not support structured output well")
-            self._transcript.finalize_no_translation(msg_id)
+            # self._transcript.finalize_no_translation(msg_id)
             if self._overlay:
                 self._overlay.update_translation(
                     msg_id, f"[{t('error_repetition')}]", 0
@@ -1126,7 +1143,7 @@ class LiveTranslateApp:
                 log.warning(f"Translate error: {e}")
             else:
                 log.error(f"Translate error: {e}", exc_info=True)
-            self._transcript.finalize_no_translation(msg_id)
+            # self._transcript.finalize_no_translation(msg_id)
             if self._overlay:
                 self._overlay.update_translation(msg_id, f"[error: {e}]", 0)
 
@@ -1147,6 +1164,10 @@ class LiveTranslateApp:
                 lang, result = future.result()
                 tl_dict[lang] = result
                 log.info(f"Extra translate [{lang}]: {result}")
+                if self._history and result:
+                    # The subtitle window's extra languages are real translations of
+                    # the same sentence, so each one gets its own history row.
+                    self._history.log(text, result, lang)
             except Exception as e:
                 import openai
                 if isinstance(e, (openai.APIConnectionError, openai.APITimeoutError,
@@ -1220,7 +1241,9 @@ class LiveTranslateApp:
         self._last_interim_check_time = 0.0
         self._interim_committed_tail = ""
         self._tl_executor.shutdown(wait=True)
-        self._transcript.close()
+        # self._transcript.close()
+        if self._history:
+            self._history.close()
         if self._mem_periodic_timer is not None:
             try:
                 self._mem_periodic_timer.stop()
@@ -1304,7 +1327,7 @@ class LiveTranslateApp:
             self._overlay.add_message(
                 msg_id, timestamp, original_text, source_lang, asr_ms
             )
-        self._transcript.write_original(msg_id, timestamp, original_text)
+        # self._transcript.write_original(msg_id, timestamp, original_text)
 
         # Store for subtitle window (translation will be added later)
         self._last_original = original_text
@@ -1321,7 +1344,7 @@ class LiveTranslateApp:
 
         if source_lang == target_lang:
             log.info(f"Same language ({source_lang}), no translation")
-            self._transcript.finalize_no_translation(msg_id)
+            # self._transcript.finalize_no_translation(msg_id)
             if self._overlay:
                 self._overlay.update_translation(msg_id, "", 0)
                 self._overlay.update_stats(
@@ -1545,7 +1568,7 @@ class LiveTranslateApp:
 
         if self._overlay:
             self._overlay.add_message(msg_id, timestamp, original_text, source_lang, asr_ms)
-        self._transcript.write_original(msg_id, timestamp, original_text)
+        # self._transcript.write_original(msg_id, timestamp, original_text)
 
         self._last_original = original_text
         self._last_msg_id = msg_id
@@ -1558,7 +1581,7 @@ class LiveTranslateApp:
 
         if source_lang == target_lang:
             log.info(f"Same language ({source_lang}), no translation")
-            self._transcript.finalize_no_translation(msg_id)
+            # self._transcript.finalize_no_translation(msg_id)
             if self._overlay:
                 self._overlay.update_translation(msg_id, "", 0)
                 self._overlay.update_stats(self._asr_count, self._translate_count, self._total_prompt_tokens, self._total_completion_tokens, self._compute_cost())

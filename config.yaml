@@ -61,6 +61,15 @@ translation:
     近期对话上下文：
     {context}
 
+history:
+  # Append every finished translation to the shared SQLite history database --
+  # the same file the C# LiveCaptions-Translator writes, one row per sentence
+  # (Timestamp / SourceText / TranslatedText / TargetLanguage / ApiUsed).
+  # TargetLanguage is stored in that app's tag form (zh -> zh-CN), so both
+  # programs' rows read the same; see LANGUAGE_TAGS in history_db.py.
+  # Leave empty to turn the database off.
+  db_path: "D:/forDesktop/LiveCaptions-Translator/bin/Release/net8.0-windows/translation_history.db"
+
 subtitle:
   # Font family
   font_family: "Microsoft YaHei"

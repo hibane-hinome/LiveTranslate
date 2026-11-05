@@ -36,6 +36,7 @@ main.py (LiveTranslateApp)
   |-- asr_funasr_nano.py   FunASR Nano backend
   |-- asr_anime_whisper.py Anime-Whisper backend (litagin/anime-whisper, ja anime/galgame)
   |-- translator.py        OpenAI-compatible API client, streaming, JSON schema, context history
+  |-- history_db.py        Appends each finished translation to the shared SQLite history (C# app's translation_history.db)
   |-- subtitle_overlay.py  PyQt6 transparent overlay (2-row header: controls + model/lang combos)
   |-- subtitle_window.py   Standalone subtitle window for OBS capture (outlined text, animations)
   |-- subtitle_settings.py Subtitle window settings UI (grid layout, text line editor)
