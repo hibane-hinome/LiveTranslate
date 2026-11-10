@@ -68,7 +68,7 @@ history:
   # TargetLanguage is stored in that app's tag form (zh -> zh-CN), so both
   # programs' rows read the same; see LANGUAGE_TAGS in history_db.py.
   # Leave empty to turn the database off.
-  db_path: "D:/forDesktop/LiveCaptions-Translator/bin/Release/net8.0-windows/translation_history.db"
+  db_path: "D:/HibaneHinome/live-archive/.data/translation_history.db"
 
 subtitle:
   # Font family
