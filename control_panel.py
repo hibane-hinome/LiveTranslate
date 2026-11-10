@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QColorDialog,
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFontComboBox,
     QGridLayout,
     QGroupBox,
@@ -619,6 +620,28 @@ class ControlPanel(QWidget):
         self._timeout_spin.valueChanged.connect(self._auto_save)
         net_layout.addWidget(self._timeout_spin, 0, 1)
         layout.addWidget(net_group)
+
+        history_group = QGroupBox(t("group_history_db"))
+        history_layout = QGridLayout(history_group)
+        history_layout.setColumnStretch(1, 1)
+        history_layout.addWidget(QLabel(t("label_history_db_path")), 0, 0)
+        default_db = ""
+        try:
+            default_db = str(self._config.get("history", {}).get("db_path") or "")
+        except Exception:
+            default_db = ""
+        initial_db = (
+            s["history_db_path"] if "history_db_path" in s else default_db
+        )
+        self._history_db_edit = QLineEdit(str(initial_db))
+        self._history_db_edit.setPlaceholderText(t("label_history_db_hint"))
+        self._history_db_edit.setToolTip(t("label_history_db_hint"))
+        self._history_db_edit.editingFinished.connect(self._auto_save)
+        history_layout.addWidget(self._history_db_edit, 0, 1)
+        browse_btn = QPushButton(t("btn_browse"))
+        browse_btn.clicked.connect(self._pick_history_db)
+        history_layout.addWidget(browse_btn, 0, 2)
+        layout.addWidget(history_group)
 
         layout.addStretch()
         return widget
@@ -1403,6 +1426,19 @@ class ControlPanel(QWidget):
             "语言已更改，请重启应用程序。",
         )
 
+    def _pick_history_db(self):
+        current = self._history_db_edit.text().strip()
+        start_dir = str(Path(current).parent) if current else str(Path(__file__).parent)
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            t("group_history_db"),
+            start_dir,
+            "SQLite (*.db *.sqlite *.db3);;All Files (*)",
+        )
+        if path:
+            self._history_db_edit.setText(path)
+            self._auto_save()
+
     def _auto_save(self):
         self._save_timer.start()
 
@@ -1487,6 +1523,10 @@ class ControlPanel(QWidget):
         if prompt_text:
             self._current_settings["system_prompt"] = prompt_text
         self._current_settings["timeout"] = self._timeout_spin.value()
+        if hasattr(self, "_history_db_edit"):
+            self._current_settings["history_db_path"] = (
+                self._history_db_edit.text().strip()
+            )
         if hasattr(self, "_incremental_asr_cb"):
             self._on_timing_changed()
         if hasattr(self, "_auto_save_transcript_cb"):

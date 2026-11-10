@@ -330,6 +330,8 @@ class LiveTranslateApp:
                     self._overlay.update_monitor(0.0, 0.0)
         if "mic_device" in settings:
             self._audio.set_mic_device(settings["mic_device"])
+        if "history_db_path" in settings:
+            self._set_history_db(settings["history_db_path"])
         if "incremental_asr" in settings:
             self._incremental_enabled = settings["incremental_asr"]
         if "interim_interval" in settings:
@@ -385,6 +387,30 @@ class LiveTranslateApp:
         if client is not None:
             log.info(f"Shutting down ASR worker: pid={client.pid}")
             client.shutdown()
+
+    def _set_history_db(self, path: str):
+        """Switch the history database without restarting; empty path disables it."""
+        path = str(path or "").strip()
+        # Settings store the path exactly as typed, so the same file can come
+        # back as "D:/x/y.db" or "D:\x\y.db". Compare normalised forms, or every
+        # unrelated settings save would close and reopen the connection.
+        if (
+            self._history is not None
+            and path
+            and Path(path).expanduser().resolve() == Path(self._history.path).resolve()
+        ):
+            return
+        if self._history is not None:
+            self._history.close()
+            self._history = None
+        if not path:
+            log.info("History database disabled")
+            return
+        self._history = TranslationHistoryDB(
+            path, api_name=f"LiveTranslate:{self._config['translation']['model']}"
+        )
+        self._config.setdefault("history", {})["db_path"] = path
+        log.info(f"History database -> {path}")
 
     def _set_asr_language(self, language: str):
         with self._asr_pending_lock:
@@ -1766,6 +1792,11 @@ def main():
     config["asr"].setdefault("funasr_model", DEFAULT_FUNASR_MODEL)
     saved = _load_saved_settings()
     migrate_funasr_settings(saved)
+
+    # The control panel can override the history database location; an empty
+    # string there means "no history", which must not fall back to config.yaml.
+    if saved is not None and "history_db_path" in saved:
+        config.setdefault("history", {})["db_path"] = saved["history_db_path"]
 
     # Log actual effective config
     _asr_eng = (saved or {}).get("asr_engine", config["asr"].get("asr_engine", "funasr"))
