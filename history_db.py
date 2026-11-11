@@ -31,6 +31,22 @@ CREATE TABLE IF NOT EXISTS TranslationHistory (
 );
 """
 
+# Columns added after the C# schema was set. They describe *when the sentence was
+# spoken* rather than when its translation came back, which is what a subtitle
+# synced to a recording needs: `Timestamp` is written after ASR + translation, so
+# it lags the voice by about a second (measured: VAD silence 0.4s + ASR 0.4s +
+# translate 0.3s). ALTER TABLE ... ADD COLUMN is append-only, so the C# history
+# page keeps reading the same table and simply sees NULLs in these columns.
+#
+#   SpeechStart  unix time of the first syllable (float, sub-second matters)
+#   Duration     length of the speech segment in seconds
+#   LagMs        spoken-end -> row written, for spotting queue hiccups
+EXTRA_COLUMNS = (
+    ("SpeechStart", "REAL"),
+    ("Duration", "REAL"),
+    ("LagMs", "INTEGER"),
+)
+
 
 # The two programs name languages differently: this app speaks ISO 639-1 ("zh",
 # "en") because that is what the LLM prompt and the UI menus use, while the C#
@@ -109,11 +125,34 @@ class TranslationHistoryDB:
         conn.execute("PRAGMA synchronous=NORMAL;")
         conn.executescript(SCHEMA)
         conn.commit()
+        self._ensure_columns(conn)
         self._conn = conn
         return conn
 
-    def log(self, source: str, translated: str, target_language: str) -> None:
-        """Append one sentence pair. Never raises."""
+    def _ensure_columns(self, conn):
+        """Add the timing columns to a database created before they existed."""
+        have = {row[1] for row in conn.execute("PRAGMA table_info(TranslationHistory)")}
+        added = []
+        for name, decl in EXTRA_COLUMNS:
+            if name not in have:
+                try:
+                    conn.execute("ALTER TABLE TranslationHistory ADD COLUMN %s %s" % (name, decl))
+                    added.append(name)
+                except sqlite3.Error as exc:  # locked or read-only: keep working
+                    log.warning("History DB: could not add column %s (%s)", name, exc)
+        if added:
+            conn.commit()
+            log.info("History DB: added timing columns %s", ", ".join(added))
+
+    def log(self, source: str, translated: str, target_language: str,
+            speech_start: float = None, duration: float = None) -> None:
+        """Append one sentence pair. Never raises.
+
+        `speech_start` is when the sentence was actually spoken, `duration` how
+        long it took. Both are optional so every existing caller keeps working;
+        when they are missing the row is marked by NULL and readers fall back to
+        `Timestamp` (which lags by roughly a second).
+        """
         source = (source or "").strip()
         translated = (translated or "").strip()
         if not source or not translated:
@@ -123,18 +162,27 @@ class TranslationHistoryDB:
         if translated.startswith("[") and translated.endswith("]"):
             return
 
+        now = time.time()
+        lag_ms = None
+        if speech_start and duration:
+            lag_ms = int(max(0.0, now - (speech_start + duration)) * 1000)
+
         with self._lock:
             try:
                 self._connect().execute(
                     "INSERT INTO TranslationHistory "
-                    "(Timestamp, SourceText, TranslatedText, TargetLanguage, ApiUsed) "
-                    "VALUES (?, ?, ?, ?, ?)",
+                    "(Timestamp, SourceText, TranslatedText, TargetLanguage, ApiUsed, "
+                    " SpeechStart, Duration, LagMs) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
-                        str(int(time.time())),
+                        str(int(now)),
                         source,
                         translated,
                         to_history_language(target_language),
                         self._api_name,
+                        float(speech_start) if speech_start else None,
+                        float(duration) if duration else None,
+                        lag_ms,
                     ),
                 )
                 self._connect().commit()

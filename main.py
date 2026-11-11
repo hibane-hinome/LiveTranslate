@@ -268,6 +268,9 @@ class LiveTranslateApp:
         self._msg_id = 0
         self._last_original = ""
         self._last_msg_id = 0
+        # msg_id -> (开口时刻 unix, 语音段秒数)。翻译是异步的，等它回来时
+        # 段信息早已离开作用域，靠这张表带到 history.log()，落成精确时间戳。
+        self._msg_timing = {}
 
         # Incremental ASR state
         self._incremental_enabled = False
@@ -1119,6 +1122,8 @@ class LiveTranslateApp:
 
     def _translate_async(self, msg_id, text, source_lang, extra_langs=None):
         """Translate text and update UI with streaming display."""
+        # 这句是几点开口的、说了多久，等会儿落库时一起写上
+        timing = self._msg_timing.get(msg_id, (None, None))
         try:
             tl_start = time.perf_counter()
             translated = None
@@ -1137,7 +1142,8 @@ class LiveTranslateApp:
                 # txt output is disabled; the history database is the record now.
                 # self._transcript.write_translation(msg_id, translated)
                 if self._history:
-                    self._history.log(text, translated, self._target_language)
+                    self._history.log(text, translated, self._target_language,
+                                      timing[0], timing[1])
             # else:
             #     self._transcript.finalize_no_translation(msg_id)
             if self._overlay:
@@ -1301,7 +1307,7 @@ class LiveTranslateApp:
         self._paused = False
         log.info("Pipeline resumed")
 
-    def _process_segment(self, speech_segment):
+    def _process_segment(self, speech_segment, spoken_end=None):
         """Run ASR + translation on a speech segment. Called from ASR thread and stop()."""
         seg_len = len(speech_segment) / 16000
         log.info(f"Speech segment: {seg_len:.1f}s")
@@ -1346,6 +1352,14 @@ class LiveTranslateApp:
         self._asr_count += 1
         self._msg_id += 1
         msg_id = self._msg_id
+        # 开口时刻：VAD 切段的时刻减去段长，就是这段音频的第一帧落在几分几秒。
+        # 比 `Timestamp`（翻译回来才写）准，且不受 ASR / 翻译快慢影响。
+        speech_start = (spoken_end - seg_len) if spoken_end else None
+        self._msg_timing[msg_id] = (speech_start, seg_len)
+        # 翻译失败的条目不会回来取，别让它无限长
+        if len(self._msg_timing) > 200:
+            for stale in sorted(self._msg_timing)[:100]:
+                self._msg_timing.pop(stale, None)
         timestamp = datetime.now().strftime("%H:%M:%S")
         log.info(f"ASR [{source_lang}] ({asr_ms:.0f}ms): {original_text}")
 
@@ -1686,7 +1700,8 @@ class LiveTranslateApp:
                         with self._vad_lock:
                             seg = self._vad.process_chunk(silence_chunk)
                         if seg is not None and self._asr_ready:
-                            self._enqueue_asr("vad_flush", seg)
+                            # 音频断流（页面静音/停顿）时也算说完，同一套时间戳
+                            self._enqueue_asr("vad_flush", seg, time.time())
                             break
                 continue
 
@@ -1721,11 +1736,19 @@ class LiveTranslateApp:
                 log.debug("ASR not ready, dropping segment")
                 continue
 
-            self._enqueue_asr("vad_flush", speech_segment)
+            # 切段这一刻就是这句话说完的时刻（VAD 已经等过句尾静音），
+            # 记下来，减掉段长就是开口时刻
+            self._enqueue_asr("vad_flush", speech_segment, time.time())
 
-    def _enqueue_asr(self, seg_type: str, segment):
+    def _enqueue_asr(self, seg_type: str, segment, spoken_end: float = None):
+        """Queue a segment for ASR.
+
+        `spoken_end` is the moment the voice stopped (when the VAD flushed the
+        segment). Subtracting the segment length from it gives when the sentence
+        started, which is what the history row records.
+        """
         try:
-            self._asr_queue.put_nowait((seg_type, segment))
+            self._asr_queue.put_nowait((seg_type, segment, spoken_end))
         except queue.Full:
             try:
                 dropped = self._asr_queue.get_nowait()
@@ -1733,7 +1756,7 @@ class LiveTranslateApp:
             except queue.Empty:
                 pass
             try:
-                self._asr_queue.put_nowait((seg_type, segment))
+                self._asr_queue.put_nowait((seg_type, segment, spoken_end))
             except queue.Full:
                 log.warning("ASR queue still full after drop, skipping segment")
 
@@ -1754,13 +1777,14 @@ class LiveTranslateApp:
             if item is None:
                 break
 
-            seg_type, segment = item
+            seg_type, segment = item[0], item[1]
+            spoken_end = item[2] if len(item) > 2 else None
 
             if seg_type == "vad_flush":
                 if self._interim_active:
                     self._process_interim_final(segment)
                 else:
-                    self._process_segment(segment)
+                    self._process_segment(segment, spoken_end)
                 self._interim_active = False
                 self._interim_pending = ""
                 self._last_interim_samples = 0
